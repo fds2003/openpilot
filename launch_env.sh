@@ -23,3 +23,7 @@ export STAGING_ROOT="/data/safe_staging"
 
 # self-hosted chestnut model catalog (adds self-compiled models to the picker)
 export SP_MODELS_URL_CHESTNUT="http://op.gitop.vip:82/egpu/c3-dev/c3-chestnut-custom/chestnut_catalog.json"
+
+# chestnut eGPU(ASM24) 功率上限：默认走显卡 SMU PPT 上限(182W)，
+# 压到 120W 降低峰值电流，缓解高负载下 USB/PCIe 链路抖动（外部分享补丁方案）
+export AM_POWER_LIMIT=120
