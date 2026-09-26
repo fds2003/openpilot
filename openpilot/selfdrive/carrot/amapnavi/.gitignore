@@ -1,0 +1,4 @@
+# 运行时参数文件：由 UnifiedParams(config.py) 在设备/本机运行时读写，
+# 内容是本机实际设置（不是代码默认值），不纳入版本库。
+# 文件缺失时 config.py 会用 _get_default_nav_data() 的默认值重建。
+nav_params.json
