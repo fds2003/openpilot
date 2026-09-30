@@ -7,11 +7,24 @@ import selectors
 import subprocess
 import sys
 import tempfile
+import time
 
 import numpy as np
 
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
+
+# fork: the generic runtime re-verifies its warp sampling boundary once real camera frames
+# flow. Measured on the C3 USB GPU that costs ~1.07s for an early frame against a ~50-100ms
+# steady state, and the old hard 1s post-startup budget tripped on it on every boot, killing
+# the worker and disabling the eGPU for the whole ignition cycle. The worker is
+# single-threaded, so a slow frame is waited out instead of being read as death; warm-up
+# frames get a wider budget while steady state stays tight, so a real hang still falls back
+# to the internal model.
+USBGPU_FIRST_RUN_TIMEOUT = float(os.getenv('USBGPU_FIRST_RUN_TIMEOUT', 60.0))
+USBGPU_WARMUP_FRAMES = int(os.getenv('USBGPU_WARMUP_FRAMES', 60))
+USBGPU_WARMUP_TIMEOUT = float(os.getenv('USBGPU_WARMUP_TIMEOUT', 20.0))
+USBGPU_RUN_TIMEOUT = float(os.getenv('USBGPU_RUN_TIMEOUT', 5.0))
 
 
 class PrecompiledModelState:
@@ -23,6 +36,7 @@ class PrecompiledModelState:
     self.output = None
     self.usbgpu = True
     self.first_run = True
+    self.frames_run = 0
     self.parser = Parser()
     self.prev_desire = np.zeros(ModelConstants.DESIRE_LEN, dtype=np.float32)
     # A named temporary file permits independently opened mmap in the worker.
@@ -31,7 +45,7 @@ class PrecompiledModelState:
       worker = Path(__file__).with_name('precompiled_worker.py')
       self.process = subprocess.Popen([sys.executable, str(worker), str(pkl_path), self.file.name, str(cam_w), str(cam_h)],
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
-      info = json.loads(self._receive(38))
+      info = json.loads(self._receive(110))
       self.shared = mmap.mmap(self.file.fileno(), info['size'])
       for name, spec in info['layout'].items():
         self.views[name] = np.ndarray(spec['shape'], np.dtype(spec['dtype']), buffer=self.shared, offset=spec['offset'])
@@ -60,6 +74,12 @@ class PrecompiledModelState:
       raise RuntimeError(json.loads(value[6:]))
     return value
 
+  def _frame_budget_s(self) -> float:
+    """Reply budget for the next frame: wide while the runtime is warming up."""
+    if self.first_run:
+      return USBGPU_FIRST_RUN_TIMEOUT
+    return USBGPU_WARMUP_TIMEOUT if self.frames_run < USBGPU_WARMUP_FRAMES else USBGPU_RUN_TIMEOUT
+
   def run(self, bufs, transforms, inputs, prepare_only):
     for name in ('img', 'big_img'):
       data = np.frombuffer(bufs[name].data, dtype=np.uint8, count=self.frame_size)
@@ -73,9 +93,22 @@ class PrecompiledModelState:
     self.views['big_tfm'][:] = transforms['big_img']
     try:
       self.process.stdin.write(b'r')
-      if self._receive(20 if self.first_run else 1) != b'1\n':
+      budget = time.monotonic() + self._frame_budget_s()
+      while True:
+        remaining = budget - time.monotonic()
+        if remaining <= 0:
+          raise TimeoutError('precompiled eGPU worker timed out')
+        try:
+          response = self._receive(remaining)
+          break
+        except TimeoutError:
+          # The worker is single-threaded: wait again for its late reply rather than
+          # sending another command, so a slow frame is not read as death.
+          continue
+      if response != b'1\n':
         raise RuntimeError('invalid model worker response')
       self.first_run = False
+      self.frames_run += 1
       result = self.output.copy()
       if not np.isfinite(result).all():
         raise ValueError('non-finite model output')
@@ -87,7 +120,9 @@ class PrecompiledModelState:
         from openpilot.selfdrive.modeld.precompiled_model import record_failure
         record_failure(self.pkl_path, exc, 'inference')
       raise
-    self.views['prev_feat'][:] = result[self.output_slices['hidden_state']]
+    if 'prev_feat' in self.views:
+      self.views['prev_feat'][:] = result[self.output_slices['hidden_state']]
+    # Generic ONNX artifacts advance all recurrent state inside their graph.
     # The fused graph advances image and policy history together, including dropped-frame catch-up.
     # It also produces a complete current-frame policy: publishing it avoids
     # an extra output gap after a dropped camera frame. The split backend still
@@ -149,4 +184,10 @@ def smoke_test(path: Path, camera_sizes=((1928, 1208), (1344, 760)), runs=5):
 
 
 if __name__ == '__main__':
-  print(json.dumps(smoke_test(Path(sys.argv[1])), indent=2))
+  import argparse
+  parser = argparse.ArgumentParser(description='Validate a precompiled model on selected camera resolutions')
+  parser.add_argument('path', type=Path)
+  parser.add_argument('--camera', action='append', choices=('1928x1208', '1344x760'))
+  args = parser.parse_args()
+  sizes = tuple(tuple(map(int, size.split('x'))) for size in (args.camera or ('1928x1208', '1344x760')))
+  print(json.dumps(smoke_test(args.path, camera_sizes=sizes), indent=2))
