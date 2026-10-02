@@ -29,7 +29,11 @@
   header { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
   h1 { font-size: 20px; margin: 0; font-weight: 600; }
   .sub { color: var(--dim); font-size: 13px; }
-  .toolbar { margin-left: auto; display: flex; gap: 8px; }
+  .toolbar { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+  /* A squeezed flex item shrinks below its own text and wraps one character per
+     line, which is what the toolbar used to do on a phone. Keep each control at
+     its natural width and let the row wrap instead. */
+  .toolbar > * { flex: 0 0 auto; white-space: nowrap; }
   button {
     font: inherit;
     border: 1px solid var(--line);
@@ -102,6 +106,28 @@
     padding: 7px 10px;
   }
   .toolbar label { color: var(--dim); font-size: 13px; align-self: center; }
+  a.back {
+    align-self: center;
+    padding: 6px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card-hi);
+    color: var(--fg);
+    font-size: 13px;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  a.back:hover { background: #273040; border-color: #384555; }
+
+  /* Phones: the toolbar drops onto its own full-width rows instead of competing
+     with the title for one line. The model-source label gets a row of its own so
+     its select can use the full width. */
+  @media (max-width: 640px) {
+    header { align-items: flex-start; }
+    .toolbar { margin-left: 0; width: 100%; justify-content: flex-start; }
+    .toolbar label { flex: 1 1 100%; }
+    .toolbar select { flex: 1 1 auto; min-width: 0; }
+  }
 </style>
 </head>
 <body>
@@ -116,6 +142,7 @@
     <select id="sourceSelect" hidden></select>
     <button id="btnRetryPrecompiled" class="mini" hidden>清除拒绝并重试</button>
     <button id="btnRefresh" class="mini">刷新</button>
+    <a class="back" href="/" title="返回设置主页">← 返回主页</a>
   </div>
 </header>
 
@@ -227,8 +254,21 @@
     if (model.active) add("当前使用中", "on");
     if (model.selected && !model.active) add("已选择 · 待重启", "sel");
     add(model.downloaded ? "已下载" : "未下载", model.downloaded ? "ok" : "miss");
+    if (model.precompiled_only) add("预编译 PKL", "sel");
     add(model.sha256.slice(0, 12) + "…");
     el.appendChild(badges);
+
+    // A precompiled-only model (Cinque v3) ships as an already-compiled PKL: there is no
+    // ONNX to compile on the device and no chunked set to split, so the delivery setting
+    // cannot apply to it. Say so instead of letting the picker look like it was ignored.
+    if (model.precompiled_only) {
+      const note = document.createElement("div");
+      note.className = state.source === "chunked" ? "banner warn" : "banner";
+      note.textContent = state.source === "chunked"
+        ? "该模型只能以预编译方式交付（没有 ONNX 可供本机编译/分片），「分片包」设置对它无效，仍会下载预编译包。"
+        : "该模型为预编译 PKL：下载后直接生效，不需要本机编译。";
+      el.appendChild(note);
+    }
 
     // Render the bar for the active model and for the selected one as well: while a
     // switch is downloading, that model is neither "downloaded" nor "active" yet, so
