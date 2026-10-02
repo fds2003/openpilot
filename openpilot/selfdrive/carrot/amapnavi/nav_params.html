@@ -355,6 +355,9 @@
             cursor: pointer;
             font-size: 12px;
             margin-left: 6px;
+            /* Applied to <a class="expand-btn"> too: the carrot-web shortcut below
+               is an anchor, which would otherwise inherit the default underline. */
+            text-decoration: none;
         }
 
         .expand-btn:first-child {
@@ -471,6 +474,9 @@
             >
             <button class="expand-btn" id="expand-all-btn">展开参数</button>
             <button class="expand-btn" id="collapse-all-btn" style="display:none;">折叠所有参数</button>
+            <!-- Carrot web (port 7000) is served on the same device: the href is filled
+                 in from location.hostname so it works whatever the device address is. -->
+            <a class="expand-btn" id="navCarrotWeb" href="#" title="打开 carrot 设置页">carrot 设置页</a>
         </div>
 
         <div class="params-container" id="params-container">
@@ -1536,6 +1542,11 @@
             };
             xhr.send(JSON.stringify(data));
         }
+
+        // carrot web (7000) lives on the same device: build the link from the current
+        // hostname so it keeps working when the device address changes.
+        const navCarrotWeb = document.getElementById('navCarrotWeb');
+        if (navCarrotWeb) navCarrotWeb.href = "http://" + window.location.hostname + ":7000/";
 
         // 页面加载完成后初始化
         if (document.readyState === 'loading') {
