@@ -2,8 +2,8 @@
 
 These tests keep two promises:
 
-* the patches work the way the eGPU stack needs (env default, firmware search order,
-  USB link failures staying retryable, the sitecustomize hook actually firing);
+* the patches work the way the eGPU stack needs (the opt-in power cap env, firmware
+  search order, USB link failures staying retryable, the sitecustomize hook firing);
 * the patches stay OUT of upstream files - the whole point of egpu_patches.py is that
   merging carrot-wip cannot conflict on them. If a patch is ever added back to one of
   those files, the last test fails and points at the right place.
@@ -34,9 +34,17 @@ def _stub_helpers():
   return module
 
 
-def test_env_default_sets_the_chestnut_power_cap(monkeypatch):
+def test_power_cap_is_opt_in_and_never_overrides_the_environment(monkeypatch):
+  """Uncapped by default; a configured cap is injected; an explicit env always wins."""
+  assert egpu_patches.AM_POWER_LIMIT == ""
+  assert egpu_patches.apply_env_defaults() is False
+  assert "AM_POWER_LIMIT" not in os.environ
+
+  # Configured: the cap reaches tinygrad's amdev.
+  monkeypatch.setattr(egpu_patches, "AM_POWER_LIMIT", "120")
   assert egpu_patches.apply_env_defaults() is True
-  assert os.environ["AM_POWER_LIMIT"] == egpu_patches.AM_POWER_LIMIT
+  assert os.environ["AM_POWER_LIMIT"] == "120"
+
   # Already set: a later call must not change it back.
   monkeypatch.setenv("AM_POWER_LIMIT", "90")
   assert egpu_patches.apply_env_defaults() is False
@@ -153,11 +161,16 @@ def test_patch_after_import_handles_an_already_imported_module():
 @pytest.mark.skipif(os.environ.get("OPENPILOT_EGPU_PATCH") == "0", reason="patches disabled by the environment")
 def test_sitecustomize_applies_the_patches_in_a_new_process():
   """The hook has to fire without anyone importing it - that is why it exists."""
-  code = "import os; print(os.environ.get('AM_POWER_LIMIT', 'unset'))"
+  # Importing the module here would prove nothing, so ask a fresh interpreter whether the
+  # hook already pulled it in: sitecustomize imports egpu_patches at interpreter start.
+  code = ("import os, sys; hooked = 'openpilot.selfdrive.modeld.egpu_patches' in sys.modules; "
+          "print(hooked, os.environ.get('AM_POWER_LIMIT', 'unset'))")
   env = {**os.environ, "PYTHONPATH": str(BASEDIR)}
   env.pop("AM_POWER_LIMIT", None)
   result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(BASEDIR), env=env, check=True)
-  assert result.stdout.strip() == egpu_patches.AM_POWER_LIMIT
+  hooked, cap = result.stdout.split()
+  assert hooked == "True"
+  assert cap == "unset"  # uncapped by default
 
 
 def test_patches_are_not_added_back_to_upstream_files():
