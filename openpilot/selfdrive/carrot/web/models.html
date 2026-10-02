@@ -29,7 +29,11 @@
   header { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
   h1 { font-size: 20px; margin: 0; font-weight: 600; }
   .sub { color: var(--dim); font-size: 13px; }
-  .toolbar { margin-left: auto; display: flex; gap: 8px; }
+  .toolbar { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+  /* A squeezed flex item shrinks below its own text and wraps one character per
+     line, which is what the toolbar used to do on a phone. Keep each control at
+     its natural width and let the row wrap instead. */
+  .toolbar > * { flex: 0 0 auto; white-space: nowrap; }
   button {
     font: inherit;
     border: 1px solid var(--line);
@@ -114,6 +118,16 @@
     white-space: nowrap;
   }
   a.back:hover { background: #273040; border-color: #384555; }
+
+  /* Phones: the toolbar drops onto its own full-width rows instead of competing
+     with the title for one line. The model-source label gets a row of its own so
+     its select can use the full width. */
+  @media (max-width: 640px) {
+    header { align-items: flex-start; }
+    .toolbar { margin-left: 0; width: 100%; justify-content: flex-start; }
+    .toolbar label { flex: 1 1 100%; }
+    .toolbar select { flex: 1 1 auto; min-width: 0; }
+  }
 </style>
 </head>
 <body>
@@ -128,9 +142,7 @@
     <select id="sourceSelect" hidden></select>
     <button id="btnRetryPrecompiled" class="mini" hidden>清除拒绝并重试</button>
     <button id="btnRefresh" class="mini">刷新</button>
-    <!-- 参数页由 amapnavi 的 8088 服务提供，本页在 carrot web(7000)：用绝对地址，
-         href 在脚本里按当前主机名拼接。 -->
-    <a class="back" id="navParamsLink" href="#" title="返回 AMAPNAVI 参数页">← 返回参数页</a>
+    <a class="back" href="/" title="返回设置主页">← 返回主页</a>
   </div>
 </header>
 
@@ -242,8 +254,21 @@
     if (model.active) add("当前使用中", "on");
     if (model.selected && !model.active) add("已选择 · 待重启", "sel");
     add(model.downloaded ? "已下载" : "未下载", model.downloaded ? "ok" : "miss");
+    if (model.precompiled_only) add("预编译 PKL", "sel");
     add(model.sha256.slice(0, 12) + "…");
     el.appendChild(badges);
+
+    // A precompiled-only model (Cinque v3) ships as an already-compiled PKL: there is no
+    // ONNX to compile on the device and no chunked set to split, so the delivery setting
+    // cannot apply to it. Say so instead of letting the picker look like it was ignored.
+    if (model.precompiled_only) {
+      const note = document.createElement("div");
+      note.className = state.source === "chunked" ? "banner warn" : "banner";
+      note.textContent = state.source === "chunked"
+        ? "该模型只能以预编译方式交付（没有 ONNX 可供本机编译/分片），「分片包」设置对它无效，仍会下载预编译包。"
+        : "该模型为预编译 PKL：下载后直接生效，不需要本机编译。";
+      el.appendChild(note);
+    }
 
     // Render the bar for the active model and for the selected one as well: while a
     // switch is downloading, that model is neither "downloaded" nor "active" yet, so
@@ -468,10 +493,6 @@
   }
 
   $("btnRefresh").addEventListener("click", load);
-  // 参数页在 amapnavi 的 8088 端口，本页在 carrot web(7000)：跨端口的链接跳转不受
-  // 同源策略限制，主机名按当前访问地址拼，换设备无需改页面。
-  const navParamsLink = $("navParamsLink");
-  if (navParamsLink) navParamsLink.href = "http://" + location.hostname + ":8088/nav_params";
   load();
   setInterval(() => { load(); }, 20000);
   setInterval(refreshDownloadProgress, 2000);
