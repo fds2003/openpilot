@@ -9,9 +9,13 @@ worker subprocess and the ``check_usbgpu`` probe alike).
 
 What is patched, and why the patches are needed at all:
 
-* ``AM_POWER_LIMIT``: the chestnut (ASM24) board defaults to the GPU's SMU PPT limit
-  (~182W). 120W lowers the peak current and cuts USB/PCIe link flapping under load,
-  which showed up as ``bulk IN`` I/O errors mid-inference. tinygrad's amdev reads it.
+* ``AM_POWER_LIMIT``: no cap is applied by default any more. The chestnut (ASM24)
+  board defaults to the GPU's own SMU PPT limit (~182W), and the 120W cap this module
+  used to set was costing real inference time: measured on a C3 running the big model,
+  40.5 ms/frame capped vs 33.6 ms/frame uncapped (same scene, 20 Hz, neither run
+  erroring). The cap was originally added to stop ``bulk IN`` / PCIe link flapping under
+  load, so it stays available as an opt-in: set AM_POWER_LIMIT in the environment
+  (e.g. "120") to cap again without touching code. tinygrad's amdev reads it.
 * ``tinygrad.helpers.fetch_fw``: tinygrad only looks for AMD firmware in
   ``/lib/firmware`` and otherwise downloads it from gitlab. That directory holds a
   different linux-firmware build than the one tinygrad pins, the download is blocked
@@ -47,7 +51,9 @@ from collections.abc import Callable
 
 ENABLED = os.environ.get("OPENPILOT_EGPU_PATCH", "1") != "0"
 
-AM_POWER_LIMIT = "120"
+# Opt-in cap in watts, the unit tinygrad's amdev expects. Empty means no cap, i.e.
+# the chestnut board's own default (~182W for the current eGPU).
+AM_POWER_LIMIT = ""
 
 # Firmware search order for fetch_fw: the read-only system dir AGNOS ships, then the
 # persistent dir the model server fills. The in-tree blobs (see firmware_bases()) are
@@ -132,7 +138,12 @@ def _decompress(raw: bytes) -> bytes | None:
 
 
 def apply_env_defaults() -> bool:
-  """Set the values launch_env.sh used to export, for direct runs (the GPU probe)."""
+  """Inject the opt-in AM_POWER_LIMIT, if one is configured.
+
+  A no-op while AM_POWER_LIMIT is empty, which is the default: the cap was measured to
+  cost inference latency (see the module docstring). An AM_POWER_LIMIT already present
+  in the environment always wins, so a cap can also be applied without this module.
+  """
   changed = False
   if AM_POWER_LIMIT and os.environ.get("AM_POWER_LIMIT") is None:
     os.environ["AM_POWER_LIMIT"] = AM_POWER_LIMIT
