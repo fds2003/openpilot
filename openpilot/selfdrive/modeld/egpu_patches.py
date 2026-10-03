@@ -54,6 +54,11 @@ ENABLED = os.environ.get("OPENPILOT_EGPU_PATCH", "1") != "0"
 # Opt-in cap in watts, the unit tinygrad's amdev expects. Empty means no cap, i.e.
 # the chestnut board's own default (~182W for the current eGPU).
 AM_POWER_LIMIT = ""
+# The precompiled worker gets a cap instead of the default above. Every generic-onnx artifact
+# we tested dies with "bulk IN 0x81 failed: Input/Output Error" at full clocks on two C3s, while
+# the same artifact is stable for hours with a power wall. The chunked model runs through this
+# repo's own tinygrad, which retries those transfers, and has run uncapped for hours.
+AM_POWER_LIMIT_PRECOMPILED = "120"
 
 # Firmware search order for fetch_fw: the read-only system dir AGNOS ships, then the
 # persistent dir the model server fills. The in-tree blobs (see firmware_bases()) are
@@ -137,20 +142,36 @@ def _decompress(raw: bytes) -> bytes | None:
     return None
 
 
-def apply_env_defaults() -> bool:
-  """Inject the opt-in AM_POWER_LIMIT, if one is configured.
+def _is_precompiled_worker() -> bool:
+  """True inside the subprocess that owns the AMD device for a precompiled artifact.
 
-  A no-op while AM_POWER_LIMIT is empty, which is the default: the cap was measured to
-  cost inference latency (see the module docstring). An AM_POWER_LIMIT already present
-  in the environment always wins, so a cap can also be applied without this module.
+  That worker is exec'd as ``<python> .../precompiled_worker.py <pkl> ...`` and is the only
+  process that initialises the eGPU for a precompiled delivery, so the power cap is decided
+  there: a delivery switch then needs no restart, and the chunked model keeps running uncapped.
+  """
+  return any("precompiled_worker.py" in str(arg) for arg in sys.argv[:2])
+
+
+def apply_env_defaults() -> bool:
+  """Inject AM_POWER_LIMIT for the delivery that is actually about to use the eGPU.
+
+  Precompiled worker -> AM_POWER_LIMIT_PRECOMPILED (override with the same env var, e.g.
+  AM_POWER_LIMIT_PRECOMPILED="" for a full-speed A/B). Anything else (the chunked model in
+  modeld) -> no cap unless AM_POWER_LIMIT is set by the environment.
   """
   changed = False
-  if AM_POWER_LIMIT and os.environ.get("AM_POWER_LIMIT") is None:
+  if _is_precompiled_worker():
+    want = os.environ.get("AM_POWER_LIMIT_PRECOMPILED", AM_POWER_LIMIT_PRECOMPILED)
+    if want and os.environ.get("AM_POWER_LIMIT") != want:
+      os.environ["AM_POWER_LIMIT"] = want
+      changed = True
+    elif not want and "AM_POWER_LIMIT" in os.environ:
+      del os.environ["AM_POWER_LIMIT"]
+      changed = True
+  elif AM_POWER_LIMIT and os.environ.get("AM_POWER_LIMIT") is None:
     os.environ["AM_POWER_LIMIT"] = AM_POWER_LIMIT
     changed = True
   return changed
-
-
 def patch_fetch_fw(helpers) -> bool:
   """Wrap tinygrad's fetch_fw so the local firmware dirs are searched first."""
   if getattr(helpers, "_fork_fw_bases", None) is not None:
