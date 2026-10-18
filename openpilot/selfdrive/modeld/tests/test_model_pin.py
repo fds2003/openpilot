@@ -10,7 +10,7 @@ import openpilot.selfdrive.modeld.big_model as big_model
 from openpilot.selfdrive.modeld import model_catalog, model_source
 from openpilot.selfdrive.modeld.big_model import BigModelManifest
 
-PIN_MODEL_ID = "comma-pr38823-cinque-v2-37bfa141-09d080f3"
+PIN_MODEL_ID = "comma-pr39087-md-v3-e86b58dc-d4c7a3fc"
 V3_MODEL_ID = "comma-pr38932-cinque-v3-892fc3a1-e758b96d"
 
 
@@ -25,14 +25,16 @@ def v3_manifest():
   return BigModelManifest.from_dict(dict(model_source.OPTIONAL_MODELS[0]), model_source.OPTIONAL_MODELS[0]["url"])
 
 
-def test_pin_is_the_fork_cinque_v2():
+def test_pin_is_the_fork_md_v3():
+  # Mountain Dew v3 is upstream's default too, but the fork serves it from the LAN
+  # mirror, so the pin must not fall back to the NAS manifest URL.
   manifest = model_source.pinned_manifest(big_model.DEFAULT_MANIFEST_URL)
   assert manifest is not None
   assert manifest.model_id == PIN_MODEL_ID
-  assert manifest.size == 766_040_736
-  assert manifest.sha256 == "09d080f36965bb2a0790500452bd328aa03c484d0222aa79d1ad9f021a522aec"
-  assert manifest.url == f"{model_source.MODEL_BASE}/models/cinque-v2/big_driving_supercombo.onnx"
-  assert not manifest.precompiled_only
+  assert manifest.size == 799_941_965
+  assert manifest.sha256 == "d4c7a3fcfc95813826ca871a80bea18df833aacb2eb6f5333e25a01e65b1a422"
+  assert manifest.url == f"{model_source.MODEL_BASE}/models/md-v3/big_driving_tinygrad.pkl"
+  assert manifest.precompiled_only
 
 
 def test_fetch_manifest_serves_the_pin_without_the_network(monkeypatch):
@@ -55,7 +57,7 @@ def test_web_selection_wins_over_the_pin(monkeypatch):
 
 def test_optional_cinque_v3_is_offered_and_selectable(tmp_path):
   manifests = model_source.optional_manifests()
-  assert [m.filename for m in manifests] == ["big_driving_tinygrad.pkl"]
+  assert [m.filename for m in manifests] == ["big_driving_tinygrad.pkl", "big_driving_supercombo.onnx"]
   v3 = manifests[0]
   assert v3.model_id == V3_MODEL_ID
   assert v3.sha256 == "e758b96df27858ea97122d18554930d04f9f8bda417417074edfb3a72b008d0b"
