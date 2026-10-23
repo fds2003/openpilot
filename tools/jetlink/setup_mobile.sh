@@ -42,6 +42,34 @@ import signal
 import sys
 import time
 
+# dnsmasq defers its queued SIGTERM while checking a DHCP address with ICMP.
+# Its three-second probe can outlive a two-second shutdown deadline. Allow
+# that normal path to finish; never remove ownership/rebind while it is alive.
+STOP_TIMEOUT = 5.0
+
+
+def wait_for_exit(proc, start, fd):
+  if fd is not None:
+    poll = select.poll()
+    poll.register(fd, select.POLLIN)
+    if poll.poll(int(STOP_TIMEOUT * 1000)):
+      return
+  else:
+    deadline = time.monotonic() + STOP_TIMEOUT
+    while True:
+      try:
+        fields = (proc / 'stat').read_text().rsplit(') ', 1)[1].split()
+      except FileNotFoundError:
+        return
+      if fields[19] != start or fields[0] == 'Z':
+        return
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        break
+      time.sleep(min(.02, remaining))
+  raise ValueError('helper dnsmasq did not stop within five seconds')
+
+
 state, action = Path(sys.argv[1]), sys.argv[2]
 lease_dir = Path(sys.argv[3])
 pidfile, record = state / 'dnsmasq.pid', state / 'dnsmasq.owner'
@@ -78,52 +106,35 @@ try:
       saved = json.loads(record.read_text())
       if saved != {'pid': pid, 'start': start}:
         raise ValueError('PID was reused or is not helper-owned')
-
-    def send(sig, wait):
-      """Signal the recorded PID after revalidating it, then wait up to `wait` s.
-
-      A vanished /proc entry counts as stopped: there is nothing left to signal,
-      and reporting a failure then would block the daemon over a process that is
-      already gone.
-      """
-      if fd is not None and hasattr(signal, 'pidfd_send_signal'):
-        signal.pidfd_send_signal(fd, sig)
-        poll = select.poll()
-        poll.register(fd, select.POLLIN)
-        return bool(poll.poll(int(wait * 1000)))
-      try:
-        latest = (proc / 'stat').read_text().rsplit(') ', 1)[1].split()[19]
-        matched = latest == start and (proc / 'cmdline').read_bytes().split(b'\0') == args
-      except OSError:
-        return True
-      if not matched:
-        raise ValueError('PID changed before signaling')
-      try:
-        os.kill(pid, sig)
-      except ProcessLookupError:
-        return True
-      deadline = time.monotonic() + wait
-      while True:
-        try:
-          fields = (proc / 'stat').read_text().rsplit(') ', 1)[1].split()
-        except OSError:
-          return True
-        if fields[19] != start or fields[0] == 'Z':
-          return True
-        if time.monotonic() >= deadline:
-          return False
-        time.sleep(.02)
-
     if action == 'stop':
-      # Escalate once instead of giving up. dnsmasq can sit in a syscall past a
-      # short SIGTERM grace (the netdev is already gone when the daemon tears the
-      # cable down), and failing there left modeld's daemon permanently `blocked`:
-      # it may not rebind without proof the previous DHCP owner is gone. The
-      # ownership rechecks above are what make the escalation safe - only a PID
-      # this helper recorded, still running the helper's own executable and exact
+      # dnsmasq defers its queued SIGTERM while checking a DHCP address with
+      # ICMP; its three-second probe can outlive a short deadline, so allow the
+      # full STOP_TIMEOUT before escalating. Escalate once instead of giving up:
+      # the netdev is already gone when the daemon tears the cable down, and
+      # failing there left modeld's daemon permanently `blocked` - it may not
+      # rebind without proof the previous DHCP owner is gone. The ownership
+      # rechecks above are what make the escalation safe - only a PID this
+      # helper recorded, still running the helper's own executable and exact
       # arguments, is ever signalled.
-      if not send(signal.SIGTERM, 2.0) and not send(signal.SIGKILL, 2.0):
-        raise ValueError('helper dnsmasq survived SIGTERM and SIGKILL; refusing to report a clean teardown')
+      try:
+        if fd is not None and hasattr(signal, 'pidfd_send_signal'):
+          signal.pidfd_send_signal(fd, signal.SIGTERM)
+        else:
+          latest = (proc / 'stat').read_text().rsplit(') ', 1)[1].split()[19]
+          if latest != start or (proc / 'cmdline').read_bytes().split(b'\0') != args:
+            raise ValueError('PID changed before signaling')
+          os.kill(pid, signal.SIGTERM)
+        try:
+          wait_for_exit(proc, start, fd)
+        except ValueError:
+          if fd is not None and hasattr(signal, 'pidfd_send_signal'):
+            signal.pidfd_send_signal(fd, signal.SIGKILL)
+          else:
+            os.kill(pid, signal.SIGKILL)
+          wait_for_exit(proc, start, fd)
+      except (FileNotFoundError, ProcessLookupError):
+        # This exact, already validated process can exit before the signal.
+        pass
       pidfile.unlink(missing_ok=True)
       record.unlink(missing_ok=True)
   finally:
