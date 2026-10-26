@@ -135,7 +135,8 @@ static void puth4(unsigned int i) {
 }
 #endif
 
-#if defined(DEBUG_SPI) || defined(BOOTSTUB) || defined(DEBUG_USB) || defined(DEBUG_COMMS)
+// F4 的 main.c 会无条件用 hexdump 打印 MCU UID，所以 F4 总是需要这个定义
+#if defined(DEBUG_SPI) || defined(BOOTSTUB) || defined(DEBUG_USB) || defined(DEBUG_COMMS) || defined(STM32F4)
 static void hexdump(const void *a, int l) {
   if (a != NULL) {
     for (int i=0; i < l; i++) {

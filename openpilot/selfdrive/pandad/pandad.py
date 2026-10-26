@@ -5,6 +5,7 @@ import usb1
 import time
 import signal
 import subprocess
+from itertools import accumulate
 
 from panda import Panda, PandaDFU, PandaProtocolMismatch, McuType, FW_PATH
 from openpilot.common.basedir import BASEDIR
@@ -15,9 +16,86 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.selfdrive.pandad.rivian_long_flasher import flash_rivian_long
 
 
-def get_expected_signature() -> bytes:
-  fn = os.path.join(FW_PATH, McuType.H7.config.app_fn)
+def get_expected_signature(panda) -> bytes:
+  """按 panda 实际 MCU 取期望固件签名：C3 的 DOS(F4) 用 panda.bin，C3XL 的 CUATRO(H7) 用 panda_h7.bin。"""
+  fn = os.path.join(FW_PATH, panda.mcu_type.config.app_fn)
   return Panda.get_signature_from_firmware(fn)
+
+
+def wait_for_panda_serial(serial: str, timeout: float = 30.0) -> bool:
+  t0 = time.monotonic()
+  while time.monotonic() - t0 < timeout:
+    try:
+      if serial in Panda.list():
+        return True
+    except Exception:
+      pass
+    time.sleep(0.5)
+  return False
+
+
+def flash_internal_dos(panda_serial: str):
+  """Full reflash of the internal DOS panda (STM32F4, comma three / C3).
+
+  The DOS panda is soldered onto the mainboard and connected to the SoC over
+  USB only (there is no SPI connection). Its firmware does not respond to the
+  USB 0xd1 "enter bootloader" vendor command (it returns STALL), so neither
+  the normal flasher path (panda.flash) nor the USB DFU recover path works.
+
+  The only reliable way to reflash it is:
+    1. GPIO: hold BOOT0 and reset -> ST ROM bootloader enumerates as 0483:df11
+    2. DFU:  erase and write bootstub + app over the ST bootloader
+    3. GPIO: release BOOT0 and reset -> boot the app from flash
+  """
+  f4 = McuType.F4.config
+
+  # 1. enter DFU by holding BOOT0 and resetting
+  cloudlog.info("DOS panda: entering ROM bootloader (DFU) via GPIO")
+  HARDWARE.recover_internal_panda()
+  dfu_serials: list[str] = []
+  t0 = time.monotonic()
+  while time.monotonic() - t0 < 30:
+    try:
+      dfu_serials = PandaDFU.list()
+    except Exception:
+      dfu_serials = []
+    if dfu_serials:
+      break
+    time.sleep(0.5)
+  if not dfu_serials:
+    raise Exception("DOS panda: did not enter DFU after GPIO recover")
+
+  # 2. full reflash over DFU
+  dfu = PandaDFU(dfu_serials[0])
+  handle = dfu._handle
+  try:
+    handle.clear_status()
+
+    with open(os.path.join(FW_PATH, f4.bootstub_fn), "rb") as f:
+      bootstub_code = f.read()
+    with open(os.path.join(FW_PATH, f4.app_fn), "rb") as f:
+      app_code = f.read()
+
+    # bootstub lives in sector 0; app starts at sector 1
+    apps_sectors_cumsum = list(accumulate(f4.sector_sizes[1:]))
+    last_sector = next((i + 1 for i, v in enumerate(apps_sectors_cumsum) if v > len(app_code)), None)
+    if last_sector is None or last_sector < 1:
+      raise Exception(f"DOS panda: bad app size {len(app_code)}")
+    if last_sector >= 7:
+      raise Exception(f"DOS panda: app too large ({len(app_code)} bytes)")
+
+    for i in range(0, last_sector + 1):
+      handle.erase_sector(i)
+
+    cloudlog.info(f"DOS panda: writing bootstub ({len(bootstub_code)} bytes) + app ({len(app_code)} bytes)")
+    handle.program(f4.bootstub_address, bootstub_code)
+    handle.program(f4.app_address, app_code)
+  finally:
+    dfu.close()
+
+  # 3. boot from flash
+  cloudlog.info("DOS panda: reflashed, resetting to boot app")
+  HARDWARE.reset_internal_panda()
 
 def flash_panda(panda_serial: str):
   panda = Panda(panda_serial)
@@ -28,7 +106,8 @@ def flash_panda(panda_serial: str):
     panda.close()
     return
 
-  fw_signature = get_expected_signature()
+  fw_signature = get_expected_signature(panda)
+  hw_type = panda.get_type()
   internal_panda = panda.is_internal()
 
   panda_version = "bootstub" if panda.bootstub else panda.get_version()
@@ -37,8 +116,26 @@ def flash_panda(panda_serial: str):
 
   if panda.bootstub or panda_signature != fw_signature:
     cloudlog.info("Panda firmware out of date, update required")
-    panda.flash()
+    panda.close()
+    if internal_panda and hw_type == Panda.HW_TYPE_DOS:
+      # C3: internal DOS panda (USB-only, no SPI). Its firmware does not
+      # respond to the USB 0xd1 bootloader command (STALL), so reflash the
+      # full image over the ST ROM bootloader reached via GPIO BOOT0.
+      flash_internal_dos(panda_serial)
+    else:
+      panda = Panda(panda_serial)
+      try:
+        panda.flash()
+      except Exception:
+        cloudlog.exception("flasher-based flash failed, falling back to DFU recover")
+        panda = Panda(panda_serial)
+        panda.recover(reset=(not internal_panda))
     cloudlog.info("Done flashing")
+
+  # wait for the panda to re-enumerate and connect after flashing
+  if not wait_for_panda_serial(panda_serial, timeout=30):
+    raise Exception("panda did not come back after flashing")
+  panda = Panda(panda_serial)
 
   if panda.bootstub:
     bootstub_version = panda.get_version()
@@ -61,17 +158,32 @@ def flash_panda(panda_serial: str):
 
 
 def check_panda_support(panda_serials: list[str]) -> list[str]:
+  # 1. 优先内部 panda(SPI 或内部 USB)
   spi_serials = set(Panda.spi_list())
   for serial in panda_serials:
     if serial in spi_serials:
       return [serial]
 
   for serial in panda_serials:
-    panda = Panda(serial)
-    is_internal = panda.is_internal()
-    panda.close()
-    if is_internal:
-      return [serial]
+    try:
+      panda = Panda(serial)
+      is_internal = panda.is_internal()
+      panda.close()
+      if is_internal:
+        return [serial]
+    except Exception:
+      continue
+
+  # 2. 没有内部 panda 时，接受任何受支持的 panda(例如外挂的 USB panda，或 C3 上未被识别为 internal 的 DOS)
+  for serial in panda_serials:
+    try:
+      panda = Panda(serial)
+      is_supported = panda.get_type() in Panda.SUPPORTED_DEVICES
+      panda.close()
+      if is_supported:
+        return [serial]
+    except Exception:
+      continue
 
   return []
 
@@ -105,11 +217,17 @@ def main() -> None:
   while not do_exit:
     try:
       cloudlog.event("pandad.flash_and_connect", count=count)
-      HARDWARE.reset_internal_panda()
       count += 1
-      # The internal SPI panda can take a while (up to ~60s on occasion) to
+
+      # 只在 panda 不在位时才复位；panda 已经跑起来时复位反而会打断它
+      # (C3 的 DOS panda 是 USB-only，复位后需要数秒才重新枚举)
+      panda_serials: list[str] = Panda.list()
+      if not panda_serials:
+        cloudlog.info("No pandas found, resetting internal panda")
+        HARDWARE.reset_internal_panda()
+
+      # The internal panda can take a while (up to ~60s on occasion) to
       # boot its app after a reset, so wait generously.
-      panda_serials: list[str] = []
       for _ in range(120):
         panda_serials = Panda.list()
         if panda_serials:
@@ -143,17 +261,29 @@ def main() -> None:
       if len(panda_serials):
         # custom flasher for xnor's Rivian Longitudinal Upgrade Kit
         flash_rivian_long(panda_serials)
-        # find the internal supported panda (e.g. skip external Black Panda)
+        # prefer an internal panda; otherwise fall back to a supported external panda
         panda_serials = check_panda_support(panda_serials)
 
-        assert len(panda_serials) == 1
-        cloudlog.info(f"{len(panda_serials)} panda found, connecting - {panda_serials}")
-        flash_panda(panda_serials[0])
+        if len(panda_serials) == 1:
+          cloudlog.info(f"{len(panda_serials)} panda found, connecting - {panda_serials}")
+          flash_panda(panda_serials[0])
 
-        # run real pandad
-        os.environ['MANAGER_DAEMON'] = 'pandad'
-        process = subprocess.Popen(["./pandad"], cwd=os.path.join(BASEDIR, "openpilot/selfdrive/pandad"))
-        process.wait()
+          # give the python libusb handles a moment to fully release the USB
+          # interface before handing off to the C++ pandad
+          time.sleep(2)
+
+          # run real pandad. Pass the serial explicitly: USB-only pandas (e.g.
+          # C3's internal DOS) can be unreliable to re-list from a fresh C++
+          # process right after a python session.
+          os.environ['MANAGER_DAEMON'] = 'pandad'
+          process = subprocess.Popen(["./pandad", panda_serials[0]], cwd=os.path.join(BASEDIR, "openpilot/selfdrive/pandad"))
+          process.wait()
+        elif len(panda_serials) > 1:
+          cloudlog.warning(f"multiple supported pandas found, cannot run single-panda pandad: {panda_serials}")
+        else:
+          cloudlog.warning("no supported panda found, retrying...")
+      else:
+        cloudlog.warning("no panda found, retrying...")
     # TODO: wrap all panda exceptions in a base panda exception
     except (usb1.USBErrorNoDevice, usb1.USBErrorPipe):
       # a panda was disconnected while setting everything up. let's try again

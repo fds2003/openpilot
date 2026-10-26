@@ -54,6 +54,8 @@ void set_power_save_state(bool enable) {
   }
 }
 
+// STM32H7 only: F4 没有这套低功耗流程(FDCAN/DTS/PWR 寄存器都不同)
+#ifdef STM32H7
 static void enter_stop_mode(void) {
   // the SPI CS interrupt shares an IRQ with the FDCAN3 RX wakeup line, and doesn't clear its pending bit
   NVIC_DisableIRQ(EXTI15_10_IRQn);
@@ -161,3 +163,4 @@ static void enter_stop_mode(void) {
 
   NVIC_SystemReset();
 }
+#endif

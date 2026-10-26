@@ -11,6 +11,7 @@ typedef enum {
 } BootState;
 
 typedef void (*board_init)(void);
+typedef void (*board_init_bootloader)(void);
 typedef void (*board_enable_can_transceiver)(uint8_t transceiver, bool enabled);
 typedef void (*board_set_can_mode)(uint8_t mode);
 typedef uint32_t (*board_read_voltage_mV)(void);
@@ -32,6 +33,7 @@ struct board {
   const uint16_t avdd_mV;
   const uint8_t fan_enable_cooldown_time;
   board_init init;
+  board_init_bootloader init_bootloader;
   board_enable_can_transceiver enable_can_transceiver;
   board_set_can_mode set_can_mode;
   board_read_voltage_mV read_voltage_mV;
@@ -47,6 +49,8 @@ struct board {
 // ******************* Definitions ********************
 // These should match the enums in cereal/log.capnp and __init__.py
 #define HW_TYPE_UNKNOWN 0U
+#define HW_TYPE_BLACK_PANDA 3U
+#define HW_TYPE_DOS 6U
 #define HW_TYPE_RED_PANDA 7U
 #define HW_TYPE_TRES 9U
 #define HW_TYPE_CUATRO 10U
@@ -55,6 +59,7 @@ struct board {
 #define CAN_MODE_NORMAL 0U
 #define CAN_MODE_OBD_CAN2 1U
 
+extern struct board board_dos;
 extern struct board board_tres;
 extern struct board board_cuatro;
 extern struct board board_red;

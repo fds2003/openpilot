@@ -5,6 +5,8 @@
 #include "board/crc.h"
 #ifdef STM32H7
 #include "board/stm32h7/lladc_declarations.h"
+#elif defined(STM32F4)
+#include "board/stm32f4/lladc_declarations.h"
 #endif
 
 // ******************** bootkick ********************
@@ -25,6 +27,7 @@ typedef struct {
 typedef struct {
   uint8_t bus_lookup;
   uint8_t can_num_lookup;
+  int8_t forwarding_bus;
   uint32_t can_speed;
   uint32_t can_data_speed;
   bool canfd_auto;
@@ -87,6 +90,7 @@ struct fan_state_t {
   uint16_t tach_counter;
   uint16_t rpm;
   uint8_t power;
+  float error_integral;
   uint8_t cooldown_counter;
 };
 extern struct fan_state_t fan_state;
@@ -112,6 +116,7 @@ extern FDCAN_GlobalTypeDef *cans[PANDA_CAN_CNT];
 void can_clear_send(FDCAN_GlobalTypeDef *FDCANx, uint8_t can_number);
 void update_can_health_pkt(uint8_t can_number, uint32_t ir_reg);
 
+#endif // STM32H7 - fdcan only
 
 // ******************** harness ********************
 
@@ -176,8 +181,6 @@ void handle_interrupt(IRQn_Type irq_type);
 void interrupt_timer_handler(void);
 void init_interrupts(bool check_rate_limit);
 
-#endif // STM32H7
-
 // ******************** registers ********************
 
 // 10 bit hash with 23 as a prime
@@ -227,7 +230,40 @@ bool debug_get_char(char *elem);
 void print(const char *a);
 void puth(unsigned int i);
 static void hexdump(const void *a, int l);
+#ifdef STM32H7
 static inline void puth4(unsigned int i);
+#endif
+
+// ******************** uart ********************
+// STM32F4 的 drivers/uart.h 依赖这部分; H7 走上面的 debug 段。
+// H7 不能暴露这段: debug.h 里的 putch/hexdump 是 static, 会冲突。
+#if !defined(STM32H7)
+#define FIFO_SIZE_INT 0x400U
+
+typedef struct uart_ring {
+  volatile uint16_t w_ptr_tx;
+  volatile uint16_t r_ptr_tx;
+  uint8_t *elems_tx;
+  uint32_t tx_fifo_size;
+  volatile uint16_t w_ptr_rx;
+  volatile uint16_t r_ptr_rx;
+  uint8_t *elems_rx;
+  uint32_t rx_fifo_size;
+  USART_TypeDef *uart;
+  void (*callback)(struct uart_ring*);
+  bool overwrite;
+} uart_ring;
+
+void debug_ring_callback(uart_ring *ring);
+void uart_tx_ring(uart_ring *q);
+uart_ring *get_ring_by_number(int a);
+bool get_char(uart_ring *q, char *elem);
+bool injectc(uart_ring *q, char elem);
+bool put_char(uart_ring *q, char elem);
+void clear_uart_buff(uart_ring *q);
+void putch(const char a);
+void puthx(uint32_t i, uint8_t len);
+#endif
 
 // ******************** usb ********************
 
