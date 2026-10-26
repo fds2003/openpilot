@@ -77,6 +77,8 @@ class UIState(UIStateSP):
         "vehicleParameters",
         "testJoystick",
         "rawAudioData",
+        "chestnutState",  # eGPU 功耗/温度/频率（侧栏 GPU 图标上方显示）
+        "chestnutGpuState",  # 大模型运行时的 eGPU 遥测：此时监控线程会让出 USB，chestnutState 停发
       ] + self.sm_services_ext
     )
 

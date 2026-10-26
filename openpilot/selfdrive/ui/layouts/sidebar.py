@@ -229,10 +229,15 @@ class Sidebar(Widget, SidebarSP):
       rl.draw_text_ex(self._font_regular, tr(self._net_type), text_pos, FONT_SIZE, 0, Colors.WHITE)
 
   def _draw_metrics(self, rect: rl.Rectangle):
-    metrics = [(self._temp_status, 338), (self._panda_status, 496), (self._connect_status, 654)]
+    metrics = [self._temp_status, self._panda_status, self._connect_status]
 
-    for metric, y_offset in metrics:
-      self._draw_metric(rect, metric, rect.y + y_offset)
+    # 接了 eGPU 时四个框同尺寸等间距(300/442/584/726)，否则保持原来的三框布局
+    slots = 4 if self._egpu_status_visible() else 3
+    for metric, y in zip(metrics, self._metric_slot_ys(rect, slots)):
+      self._draw_metric(rect, metric, y)
+
+    # SidebarSP: 第四个框(eGPU 功耗/温度/频率)，未接 eGPU 时内部直接返回
+    self._draw_egpu_status(rect)
 
   def _draw_metric(self, rect: rl.Rectangle, metric: MetricData, y: float):
     metric_rect = rl.Rectangle(rect.x + METRIC_MARGIN, y, METRIC_WIDTH, METRIC_HEIGHT)
