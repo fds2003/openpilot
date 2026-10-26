@@ -16,7 +16,11 @@
 
 #include "board/drivers/can_common.h"
 
-#include "board/drivers/fdcan.h"
+#ifdef STM32H7
+  #include "board/drivers/fdcan.h"
+#else
+  #include "board/drivers/bxcan.h"
+#endif
 
 #include "board/sys/power_saving.h"
 
@@ -24,6 +28,21 @@
 
 #include "board/can_comms.h"
 #include "board/main_comms.h"
+
+// ********************* Serial debugging *********************
+// H7 的实现在 drivers/debug.h; F4 走串口 uart_ring(debug = USART2)
+#if !defined(STM32H7)
+void debug_ring_callback(uart_ring *ring) {
+  char rcv;
+  while (get_char(ring, &rcv)) {
+    (void)put_char(ring, rcv);  // misra-c2012-17.7: cast to void is ok: debug function
+  }
+}
+
+bool debug_get_char(char *elem) {
+  return get_char(&uart_ring_debug, elem);
+}
+#endif
 
 // ****************************** safety mode ******************************
 
@@ -272,7 +291,9 @@ int main(void) {
   led_set(LED_RED, true);
   led_set(LED_GREEN, true);
   adc_init(ADC1);
-  dts_init();
+  #ifdef STM32H7
+  dts_init();   // DTS 温度传感器只有 H7 有
+  #endif
 
   // print hello
   print("\n\n\n************************ MAIN START ************************\n");
@@ -338,9 +359,11 @@ int main(void) {
   // LED should keep on blinking all the time
   while (true) {
     #ifdef ALLOW_DEBUG
+    #ifdef STM32H7
     if (stop_mode_requested) {
       enter_stop_mode();
     }
+    #endif
     #endif
     if (!power_save_enabled) {
       // useful for debugging, fade breaks = panda is overloaded
@@ -360,8 +383,10 @@ int main(void) {
     } else {
       if ((hw_type == HW_TYPE_CUATRO) && !current_board->read_som_gpio()) {
         assert_fatal(current_safety_mode == SAFETY_SILENT, "Error: Entering low power mode while not in SAFETY_SILENT. Hanging\n");
+        #ifdef STM32H7
         enter_stop_mode(); // deep sleep, wakes on CAN or SBU activity
         assert_fatal(false, "Error: enter_stop_mode returned after system reset. Hanging\n");
+        #endif
       }
       // cppcheck-suppress misra-c2012-17.3 ; CMSIS __WFI macro expands to inline asm
       __WFI();

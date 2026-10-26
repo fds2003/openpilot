@@ -27,3 +27,6 @@ bool unused_read_som_gpio(void) {
 void unused_set_amp_enabled(bool enabled) {
   UNUSED(enabled);
 }
+
+void unused_init_bootloader(void) {
+}
